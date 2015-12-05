@@ -7,6 +7,7 @@
 #include "threads/flags.h"
 #include "threads/interrupt.h"
 #include "threads/intr-stubs.h"
+#include "threads/malloc.h"
 #include "threads/palloc.h"
 #include "threads/switch.h"
 #include "threads/synch.h"
@@ -14,12 +15,17 @@
 #ifdef USERPROG
 #include "userprog/process.h"
 #include "userprog/syscall.h"
+#include "vm/frame.h"
+#include "vm/swap.h"
 #endif
 
 /* Random value for struct thread's `magic' member.
    Used to detect stack overflow.  See the big comment at the top
    of thread.h for details. */
 #define THREAD_MAGIC 0xcd6abf4b
+
+#define MIN_FD 2
+#define NO_PARENT -1
 
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
@@ -93,6 +99,8 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
+
+  frame_table_init();
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -172,6 +180,7 @@ thread_create (const char *name, int priority,
   struct switch_entry_frame *ef;
   struct switch_threads_frame *sf;
   tid_t tid;
+  enum intr_level old_level;
 
   ASSERT (function != NULL);
 
@@ -183,6 +192,11 @@ thread_create (const char *name, int priority,
   /* Initialize thread. */
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
+
+  /* Prepare thread for first run by initializing its stack.
+     Do this atomically so intermediate values for the 'stack' 
+     member cannot be observed. */
+  old_level = intr_disable ();
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
@@ -198,6 +212,13 @@ thread_create (const char *name, int priority,
   sf = alloc_frame (t, sizeof *sf);
   sf->eip = switch_entry;
   sf->ebp = 0;
+
+  intr_set_level (old_level);
+
+  // Add child process to child list
+  t->parent = thread_tid();
+  struct child_process *cp = add_child_process(t->tid);
+  t->cp = cp;
 
   /* Add to run queue. */
   thread_unblock (t);
@@ -286,12 +307,12 @@ thread_exit (void)
 #ifdef USERPROG
   process_exit ();
 #endif
-  syscall_exit ();
-  
+
   /* Remove thread from all threads list, set our status to dying,
      and schedule another process.  That process will destroy us
      when it calls thread_schedule_tail(). */
   intr_disable ();
+  release_locks();
   list_remove (&thread_current()->allelem);
   thread_current ()->status = THREAD_DYING;
   schedule ();
@@ -453,8 +474,6 @@ is_thread (struct thread *t)
 static void
 init_thread (struct thread *t, const char *name, int priority)
 {
-  enum intr_level old_level;
-
   ASSERT (t != NULL);
   ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
   ASSERT (name != NULL);
@@ -464,15 +483,22 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
-  list_init (&t->children);
-  t->wait_status = NULL;
-  list_init (&t->fds);
-  t->next_handle = 2;
   t->magic = THREAD_MAGIC;
-
-  old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
-  intr_set_level (old_level);
+
+  t->executable = NULL;
+
+  list_init(&t->lock_list);
+
+  list_init(&t->file_list);
+  t->fd = MIN_FD;
+
+  list_init(&t->mmap_list);
+  t->mapid = 0;
+
+  list_init(&t->child_list);
+  t->cp = NULL;
+  t->parent = NO_PARENT;
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and
@@ -588,3 +614,34 @@ allocate_tid (void)
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
+
+bool thread_alive (int pid)
+{
+  struct list_elem *e;
+
+  for (e = list_begin (&all_list); e != list_end (&all_list);
+       e = list_next (e))
+    {
+      struct thread *t = list_entry (e, struct thread, allelem);
+      if (t->tid == pid)
+	{
+	  return true;
+	}
+    }
+  return false;
+}
+
+void release_locks (void)
+{
+  struct thread *t = thread_current();
+  struct list_elem *next, *e = list_begin(&t->lock_list);
+
+  while (e != list_end (&t->lock_list))
+    {
+      next = list_next(e);
+      struct lock *l = list_entry (e, struct lock, elem);
+      lock_release(l);
+      list_remove(&l->elem);
+      e = next;
+    }
+}
