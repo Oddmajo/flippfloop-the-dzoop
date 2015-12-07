@@ -1,0 +1,19 @@
+init.c - small - GRIFFIN 
+
+synch.c - small - NATE
+
+synch.h - very small - GRIFFIN
+
+thread.c - medium - GRIFFIN
+
+thread.h - medium - NATE
+
+exception.c - medium - GRIFFIN
+
+process.c - quite large - GRIFFIN
+
+process.h - small - NATE
+
+syscall.c - quite large - NATE
+
+syscall.h - small - NATE
