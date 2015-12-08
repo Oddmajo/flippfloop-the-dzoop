@@ -7,10 +7,9 @@
 #define FILE 0
 #define SWAP 1
 #define MMAP 2
-#define HASH_ERROR 3
 
 // 256 KB
-#define MAX_STACK_SIZE (1 << 23)
+#define MAX_STACK_SIZE (1 << 18)
 
 struct sup_page_entry {
   uint8_t type;
@@ -18,7 +17,6 @@ struct sup_page_entry {
   bool writable;
 
   bool is_loaded;
-  bool pinned;
 
   // For files
   struct file *file;

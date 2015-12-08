@@ -1,10 +1,8 @@
-#include "filesys/file.h"
 #include "threads/malloc.h"
 #include "threads/palloc.h"
 #include "threads/synch.h"
 #include "threads/thread.h"
 #include "userprog/pagedir.h"
-#include "userprog/syscall.h"
 #include "vm/frame.h"
 #include "vm/page.h"
 #include "vm/swap.h"
@@ -28,11 +26,7 @@ void* frame_alloc (enum palloc_flags flags, struct sup_page_entry *spte)
     }
   else
     {
-      while (!frame)
-	{
-	  frame = frame_evict(flags);
-	  lock_release(&frame_table_lock);
-	}
+      frame = frame_evict();
       if (!frame)
 	{
 	  PANIC ("Frame could not be evicted because swap is full!");
@@ -55,11 +49,11 @@ void frame_free (void *frame)
 	{
 	  list_remove(e);
 	  free(fte);
-	  palloc_free_page(frame);
 	  break;
 	}
     }
   lock_release(&frame_table_lock);
+  palloc_free_page(frame);
 }
 
 void frame_add_to_table (void *frame, struct sup_page_entry *spte)
@@ -67,58 +61,38 @@ void frame_add_to_table (void *frame, struct sup_page_entry *spte)
   struct frame_entry *fte = malloc(sizeof(struct frame_entry));
   fte->frame = frame;
   fte->spte = spte;
-  fte->thread = thread_current();
+
   lock_acquire(&frame_table_lock);
   list_push_back(&frame_table, &fte->elem);
   lock_release(&frame_table_lock);
 }
 
-void* frame_evict (enum palloc_flags flags)
+void* frame_evict (void)
 {
-  lock_acquire(&frame_table_lock);
-  struct list_elem *e = list_begin(&frame_table);
+  struct list_elem *e;
   
-  while (true)
+  lock_acquire(&frame_table_lock);
+  for (e = list_begin(&frame_table); e != list_end(&frame_table);
+       e = list_next(e))
     {
       struct frame_entry *fte = list_entry(e, struct frame_entry, elem);
-      if (!fte->spte->pinned)
+      if (pagedir_is_accessed(thread_current()->pagedir,
+			      fte->spte->uva))
 	{
-	  struct thread *t = fte->thread;
-	  if (pagedir_is_accessed(t->pagedir, fte->spte->uva))
-	    {
-	      pagedir_set_accessed(t->pagedir, fte->spte->uva, false);
-	    }
-	  else
-	    {
-	      if (pagedir_is_dirty(t->pagedir, fte->spte->uva) ||
-		  fte->spte->type == SWAP)
-		{
-		  if (fte->spte->type == MMAP)
-		    {
-		      lock_acquire(&filesys_lock);
-		      file_write_at(fte->spte->file, fte->frame,
-				    fte->spte->read_bytes,
-				    fte->spte->offset);
-		      lock_release(&filesys_lock);
-		    }
-		  else
-		    {
-		      fte->spte->type = SWAP;
-		      fte->spte->swap_index = swap_out(fte->frame);
-		    }
-		}
-	      fte->spte->is_loaded = false;
-	      list_remove(&fte->elem);
-	      pagedir_clear_page(t->pagedir, fte->spte->uva);
-	      palloc_free_page(fte->frame);
-	      free(fte);
-	      return palloc_get_page(flags);
-	    }
+	  pagedir_set_accessed(thread_current()->pagedir, fte->spte->uva,
+			       false);
 	}
-      e = list_next(e);
-      if (e == list_end(&frame_table))
+      else
 	{
-	  e = list_begin(&frame_table);
+	  if (pagedir_is_dirty(thread_current()->pagedir, fte->spte->uva)
+	      || fte->spte->type == SWAP)
+	    {
+	      fte->spte->swap_index = swap_out(fte->frame);
+	    }
+	  fte->spte->is_loaded = false;
+	  return fte->frame;
 	}
     }
+  lock_release(&frame_table_lock);
+  return NULL;
 }

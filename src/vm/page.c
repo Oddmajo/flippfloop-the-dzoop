@@ -1,14 +1,12 @@
 #include <string.h>
 #include <stdbool.h>
 #include "filesys/file.h"
-#include "threads/interrupt.h"
 #include "threads/malloc.h"
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "userprog/pagedir.h"
 #include "userprog/process.h"
-#include "userprog/syscall.h"
 #include "vm/frame.h"
 #include "vm/page.h"
 #include "vm/swap.h"
@@ -71,7 +69,6 @@ struct sup_page_entry* get_spte (void *uva)
 bool load_page (struct sup_page_entry *spte)
 {
   bool success = false;
-  spte->pinned = true;
   if (spte->is_loaded)
     {
       return success;
@@ -98,42 +95,30 @@ bool load_swap (struct sup_page_entry *spte)
     {
       return false;
     }
+  swap_in(spte->swap_index, frame);
   if (!install_page(spte->uva, frame, spte->writable))
     {
       frame_free(frame);
       return false;
     }
-  swap_in(spte->swap_index, spte->uva);
   spte->is_loaded = true;
   return true;
 }
 
 bool load_file (struct sup_page_entry *spte)
 {
-  enum palloc_flags flags = PAL_USER;
-  if (spte->read_bytes == 0)
-    {
-      flags |= PAL_ZERO;
-    }
-  uint8_t *frame = frame_alloc(flags, spte);
+  uint8_t *frame = frame_alloc (PAL_USER, spte);
   if (!frame)
     {
       return false;
     }
-  if (spte->read_bytes > 0)
+  if ((int) spte->read_bytes != file_read_at(spte->file, frame,
+					     spte->read_bytes, spte->offset))
     {
-      lock_acquire(&filesys_lock);
-      if ((int) spte->read_bytes != file_read_at(spte->file, frame,
-						 spte->read_bytes,
-						 spte->offset))
-	{
-	  lock_release(&filesys_lock);
-	  frame_free(frame);
-	  return false;
-	}
-      lock_release(&filesys_lock);
-      memset(frame + spte->read_bytes, 0, spte->zero_bytes);
+      frame_free(frame);
+      return false;
     }
+  memset(frame + spte->read_bytes, 0, spte->zero_bytes);
 
   if (!install_page(spte->uva, frame, spte->writable))
     {
@@ -162,7 +147,6 @@ bool add_file_to_page_table (struct file *file, int32_t ofs, uint8_t *upage,
   spte->writable = writable;
   spte->is_loaded = false;
   spte->type = FILE;
-  spte->pinned = false;
 
   return (hash_insert(&thread_current()->spt, &spte->elem) == NULL);
 }
@@ -183,7 +167,6 @@ bool add_mmap_to_page_table(struct file *file, int32_t ofs, uint8_t *upage,
   spte->is_loaded = false;
   spte->type = MMAP;
   spte->writable = true;
-  spte->pinned = false;
 
   if (!process_add_mmap(spte))
     {
@@ -191,17 +174,12 @@ bool add_mmap_to_page_table(struct file *file, int32_t ofs, uint8_t *upage,
       return false;
     }
 
-  if (hash_insert(&thread_current()->spt, &spte->elem))
-    {
-      spte->type = HASH_ERROR;
-      return false;
-    }
-  return true;
+  return (hash_insert(&thread_current()->spt, &spte->elem) == NULL);
 }
 
 bool grow_stack (void *uva)
 {
-  if ( (size_t) (PHYS_BASE - pg_round_down(uva)) > MAX_STACK_SIZE)
+  if (PHYS_BASE - pg_round_down(uva) > MAX_STACK_SIZE)
     {
       return false;
     }
@@ -214,7 +192,6 @@ bool grow_stack (void *uva)
   spte->is_loaded = true;
   spte->writable = true;
   spte->type = SWAP;
-  spte->pinned = true;
 
   uint8_t *frame = frame_alloc (PAL_USER, spte);
   if (!frame)
@@ -228,11 +205,6 @@ bool grow_stack (void *uva)
       free(spte);
       frame_free(frame);
       return false;
-    }
-
-  if (intr_context())
-    {
-      spte->pinned = false;
     }
 
   return (hash_insert(&thread_current()->spt, &spte->elem) == NULL);
